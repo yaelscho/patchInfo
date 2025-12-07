@@ -10,7 +10,7 @@ import mmap
 import multiprocessing as mp
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing import get_context
-
+from sklearn.model_selection import train_test_split
 import threading
 from collections import Counter
 from itertools import permutations as perm
@@ -338,18 +338,18 @@ def calcPatchDistmulti4centroid(dou):
 
 
 def process_single_patch(args):
-    i, patches, keep_percent = args
+    i, patches, keep_percent, q = args
     N = len(patches)
     row_results = []
     for j in range(N):
         if i == j:
             continue
-        _, _, dist = calcPatchDistmulti((patches[i], patches[j]))
+        _, _, dist = calcPatchDistmulti_(((patches[i], patches[j]), q))
         row_results.append((j, dist))
     k = max(1, int(len(row_results) * keep_percent / 100))
     return i, nsmallest(k, row_results, key=lambda x: x[1])
 
-def create_dissim_sparse(patches, keep_percent=1, n_jobs=16):
+def create_dissim_sparse(patches, keep_percent=5, n_jobs=16):
     """
     Create a sparse symmetric dissimilarity matrix based on custom patch distances.
 
@@ -363,14 +363,14 @@ def create_dissim_sparse(patches, keep_percent=1, n_jobs=16):
     """
     N = len(patches)
     dissim_sparse = lil_matrix((N, N))
+    for q in range(0, 101, 10):
+      args_list = [(i, patches, keep_percent, q) for i in range(N)]
 
-    args_list = [(i, patches, keep_percent) for i in range(N)]
-
-    with mp.Pool(processes=n_jobs) as pool:
-        for i, top_neighbors in tqdm(pool.imap_unordered(process_single_patch, args_list), total=N, desc="Processing rows"):
-            for j, dist in top_neighbors:
-                dissim_sparse[i, j] = dist
-                dissim_sparse[j, i] = dist  # ensure symmetry
+      with mp.Pool(processes=n_jobs) as pool:
+          for i, top_neighbors in tqdm(pool.imap_unordered(process_single_patch, args_list), total=N, desc="Processing rows"):
+              for j, dist in top_neighbors:
+                  dissim_sparse[i, j] = dist
+                  dissim_sparse[j, i] = dist  # ensure symmetry
 
     return dissim_sparse.tocsr()
 
@@ -925,7 +925,7 @@ def getPatchDS_frompkl(patch_size=8):
   return patches
 
 
-def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True, n=16, BG=True):
+def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True, n=16, BG=True, filterseg=True):
   patches = []
   ims = []
   segs = []
@@ -942,18 +942,18 @@ def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True,
                         str([72,29,111,255]): 'tv',
                         str([253,231,36,255]): 'void'}
 
-  # for i in tqdm(range(200)):
-  #   im, seg, imn, rep = sess.run([image, mask, imname, fuse])
-  #   reps.append(np.squeeze(rep))
-  #   ims.append(im)
+  for i in tqdm(range(500)):
+    im, seg, imn, rep = sess.run([image, mask, imname, fuse])
+    reps.append(np.squeeze(rep))
+    ims.append(im)
   #   # mn = seg[:3].min()
   #   # mx = seg[:3].max()
   #   # mx -= mn
   #   # seg = (((seg - mn) / mx) * 255).astype(np.uint8)
   #   # seg[seg==30]=0
   #   # seg[seg==215]=255
-  #   segs.append(seg)
-  #   imnames.append(imn)
+    segs.append(seg)
+    imnames.append(imn)
   #   # labelsInim = np.unique(seg.reshape(-1, 4), axis=0, return_counts=True)
   #   # for l in labelsInim[0]:
   #   #   if str(l).replace(" ", "") not in [str(item).replace(' ','').replace(',','') for item in PASCAL_VOC_classes.keys()]:
@@ -962,13 +962,13 @@ def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True,
 
   if ifPCA:
     # reps = pcarep_new(reps, n)
-    # pcaFit = pcafit(reps, n)
+    pcaFit = pcafit(reps, n)
 
-    # with open('pcafit.pkl', 'wb') as f:
-    #   pickle.dump(pcaFit, f)
+    with open('pcafit.pkl', 'wb') as f:
+      pickle.dump(pcaFit, f)
 
-    with open('pcafit.pkl', 'rb') as f:
-      pcaFit = pickle.load(f)
+    # with open('pcafit.pkl', 'rb') as f:
+    #   pcaFit = pickle.load(f)
     # for rep in tqdm(reps):
 
     # rep_forplot = pcarep(reps, 3)
@@ -978,7 +978,7 @@ def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True,
   # idx_nobg = 0
   counter = {}
 
-  for i in tqdm(range(2913)):
+  for i in tqdm(range(1000)):
     im, seg, imn, rep = sess.run([image, mask, imname, fuse])
     # im = ims[i]
     # seg = segs[i]
@@ -987,8 +987,8 @@ def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True,
     # flag = 0
     temp_rep = np.squeeze(rep).reshape((rep.shape[1] * rep.shape[2], rep.shape[3]))
     rep = pcaFit.transform(temp_rep).reshape((rep.shape[1], rep.shape[2], n))
-    xVec = np.arange(0, rep.shape[0] - 1, 10)
-    yVec = np.arange(0, rep.shape[1] - 1, 10)
+    xVec = np.arange(0, rep.shape[0] - 10, 5)
+    yVec = np.arange(0, rep.shape[1] - 10, 5)
     center = int(rep.shape[0] / 2), int(rep.shape[1] / 2)
     for x in xVec:
       for y in yVec:
@@ -1026,28 +1026,35 @@ def getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=4, ifPCA=True,
           mostcom = PASCAL_VOC_classes[str(list(mostcom_rgba))]
         else:
           mostcom = None
-        if mostcom=='void' or mostcom=='bicycle' or mostcom=='sofa':
-          continue
-        elif mostcom=='background' and not BG:
+        # if mostcom=='void' or mostcom=='bicycle' or mostcom=='sofa':
+        #   continue
+        if mostcom=='background' and not BG:
             continue
-
+        elif mostcom=='void':
+          continue
         elif mostcom is None:
           continue
-        elif mostcom in counter.keys():
-          # if counter[mostcom]>=300:
-          #   continue
-          # else:
-          counter[mostcom] +=1
-        else:
-            counter[mostcom]=1
+        # elif mostcom in counter.keys():
+        #   # if counter[mostcom]>=300:
+        #   #   continue
+        #   # else:
+        #   counter[mostcom] +=1
+        # else:
+        #     counter[mostcom]=1
 
-        patches.append({"idx": len(patches), "patch": patch_orig, "ref": im_orig, "seg": mostcom, "im_id": i, "im_ref": imn})
+        if not filterseg:
+          patches.append({"idx": len(patches), "patch": patch_orig, "ref": im_orig, "seg": mostcom, "im_id": i, "im_ref": imn})
+        else:
+          patches.append({"patch": patch_orig, "ref": im_orig, "seg": mostcom, "im_id": i, "im_ref": imn})
+        #
         # else:
         #   patches.append({"idx": len(patches), "patch": patch_orig, "ref": im_orig, "seg": mostCommonClass(seg_orig)})
         # patches.append({"idx": len(patches), "patch": patch_pos, "ref": im_pos, "seg": mostCommonClass(seg_pos), "label": label})
         # patches.append({"idx": len(patches), "patch": patch_neg, "ref": im_neg, "seg": mostCommonClass(seg_neg), "label": label})
         # pos_dist.append(calcPatchDist(patch_orig, patch_pos))
         # neg_dist.append(calcPatchDist(patch_orig, patch_neg))
+  if filterseg:
+    patches = filterPatches(patches, 700)
   return patches
 
 
@@ -1162,13 +1169,13 @@ def getPatchDS_MIT(sess, image, label, imname, fuse, patch_size=8, ifPCA=True, n
         #     counter[mostcom] +=1
         # else:
         #     counter[mostcom]=1
-        if seg in counter.keys():
-          if counter[seg]>=2000:
-            continue
-          else:
-            counter[seg] += 1
-        else:
-          counter[seg] = 1
+        # if seg in counter.keys():
+        #   if counter[seg]>=2000:
+        #     continue
+        #   else:
+        #     counter[seg] += 1
+        # else:
+        #   counter[seg] = 1
         patches.append({"idx": len(patches), "patch": patch_orig, "ref": im_orig, "seg": seg, "im_id": i, "im_ref": imn})
         # else:
         #   patches.append({"idx": len(patches), "patch": patch_orig, "ref": im_orig, "seg": mostCommonClass(seg_orig)})
@@ -1966,7 +1973,7 @@ def calcPatchDistmulti_GPU(p1, p2, pr):
   return p1['idx'], p2['idx'], float(cp.mean(cp.array([dist1, dist2])))
 
 def aprioriPurity(patches, dissim):
-  epsilon = int(0.005 * len(patches))
+  epsilon = int(0.01 * len(patches))
   purity = []
   for row in [p['idx'] for p in patches]:
     neighbours = np.array(patches)[np.argpartition(dissim[row], epsilon)[:epsilon]]
@@ -1977,9 +1984,10 @@ def dist_methods_comparison(patches):
   # patches = patches[:int(len(patches) * 0.8)]
   # patches = [p for p in patches if p['im_id']==range(10)]
   #generalized hausdorff
-  quantiles = [10]
+  quantiles = range(0,101,10)
   # images = np.arange(0,150)
   score_haus = {}
+  score_haus_hist = {}
   dists_same = []
   dists_notsame = []
   for q in quantiles:
@@ -1999,8 +2007,8 @@ def dist_methods_comparison(patches):
     # dists_notsame.append(b)
     # score_haus[str(q)] = score(w, b)
     p.close()
-    score_haus[str(q)] = aprioriPurity(patches, dissim)
-    # score_haus[str(q)] = np.mean(aprioriPurity(patches, dissim))
+    score_haus_hist[str(q)] = aprioriPurity(patches, dissim)
+    score_haus[str(q)] = np.mean(score_haus_hist[str(q)])
   # lda
   solvers = ['svd', 'lsqr', 'eigen']
   scores_lda = {}
@@ -2710,6 +2718,25 @@ def compute_all_dissim_parallel(patches, block_size=100, percentile=95, max_work
       dissim.flush()
   return dissim
 
+
+def filterPatches(patches, n=1000):
+  newPatches = []
+  labels, counts = np.unique([p['seg'] for p in patches], return_counts=True)
+  labelToKeep = labels[counts>n]
+  idx = 0
+  counter = {}
+  for p in patches:
+    if p['seg'] in labelToKeep:
+      counter[p['seg']] = counter.get(p['seg'], 0) + 1
+      if counter[p['seg']] <= n:
+        p['idx'] = idx
+        idx += 1
+        newPatches.append(p)
+
+  return newPatches
+
+
+
 def get_representations():
   imagenette = False
   coco = False
@@ -2717,8 +2744,8 @@ def get_representations():
   Rect = False
   BSDS = False
   coco_exp = False
-  pascal = False
-  pascal_sparse = True
+  pascal = True
+  pascal_sparse = False
   MINC= False
   MIT = False
   if BSDS:
@@ -3598,7 +3625,7 @@ def get_representations():
       coord.join(threads, stop_grace_period_secs=10)
   elif pascal:
     # image, mask, imname = getRep_pascal()
-
+    #
     # _, _, fuse = resnet50.inference(image, tf.zeros(
     #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
     #    resnet50_input.NUM_CLASSES]), tf.zeros(
@@ -3615,59 +3642,61 @@ def get_representations():
     #   else:
     #     print('No checkpoint file found')
     #     return
-    #   Start the queue runners.
-      # coord = tf.train.Coordinator()
-    # #
-    # # _, _, fuse = resnet50.inference(image, tf.zeros(
-    # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
-    # #    resnet50_input.NUM_CLASSES]), tf.zeros(
-    # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
-    # #    resnet50_input.NUM_CLASSES]))
-    # # # ### bsds model
-    # # saver = tf.train.Saver(tf.global_variables())
-    # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
-    # #                                       intra_op_parallelism_threads=1)) as sess:
-    # #   sess.run(tf.group(tf.initialize_all_variables(),
-    # #                     tf.initialize_local_variables()))
-    # #   ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-    # #   if ckpt and ckpt.model_checkpoint_path:
-    # #     saver.restore(sess, ckpt.model_checkpoint_path)
-    # #   else:
-    # #     print('No checkpoint file found')
-    # #     return
-    # # # ### pascal weights
-    # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
-    # # #                                       intra_op_parallelism_threads=1)) as sess:
-    # # #   model_dict = np.load('fp_weights.npy', allow_pickle=True).item()
-    # # #   all_vars = tf.trainable_variables()
-    # # #   for v in all_vars:
-    # # #     if (v.op.name.find("weights") > -1) and (v.op.name.find("softmax_linear") == -1) and (
-    # # #             v.op.name.find("fuse") == -1) and (v.op.name.find("conv5_3") == -1):
-    # # #       assign_op = v.assign(model_dict[v.op.name])
-    # # #       sess.run(assign_op)
-    # # #
-    # #   sess.run(tf.group(tf.initialize_all_variables(),
-    # #                     tf.initialize_local_variables()))
-    # # #   # ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-    # # #   # if ckpt and ckpt.model_checkpoint_path:
-    # # #   #   saver.restore(sess, ckpt.model_checkpoint_path)
-    # # #   # else:
-    # # #   #   print('No checkpoint file found')
-    # # #   #   return
-    # # #   # Start the queue runners.
-    # #   coord = tf.train.Coordinator()
+    # #   Start the queue runners.
+    #   coord = tf.train.Coordinator()
+    # # # #
+    # # # # _, _, fuse = resnet50.inference(image, tf.zeros(
+    # # # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
+    # # # #    resnet50_input.NUM_CLASSES]), tf.zeros(
+    # # # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
+    # # # #    resnet50_input.NUM_CLASSES]))
+    # # # # # ### bsds model
+    # # # # saver = tf.train.Saver(tf.global_variables())
+    # # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
+    # # # #                                       intra_op_parallelism_threads=1)) as sess:
+    # # # #   sess.run(tf.group(tf.initialize_all_variables(),
+    # # # #                     tf.initialize_local_variables()))
+    # # # #   ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+    # # # #   if ckpt and ckpt.model_checkpoint_path:
+    # # # #     saver.restore(sess, ckpt.model_checkpoint_path)
+    # # # #   else:
+    # # # #     print('No checkpoint file found')
+    # # # #     return
+    # # # # # ### pascal weights
+    # # # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
+    # # # # #                                       intra_op_parallelism_threads=1)) as sess:
+    # # # # #   model_dict = np.load('fp_weights.npy', allow_pickle=True).item()
+    # # # # #   all_vars = tf.trainable_variables()
+    # # # # #   for v in all_vars:
+    # # # # #     if (v.op.name.find("weights") > -1) and (v.op.name.find("softmax_linear") == -1) and (
+    # # # # #             v.op.name.find("fuse") == -1) and (v.op.name.find("conv5_3") == -1):
+    # # # # #       assign_op = v.assign(model_dict[v.op.name])
+    # # # # #       sess.run(assign_op)
+    # # # # #
+    # # # #   sess.run(tf.group(tf.initialize_all_variables(),
+    # # # #                     tf.initialize_local_variables()))
+    # # # # #   # ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+    # # # # #   # if ckpt and ckpt.model_checkpoint_path:
+    # # # # #   #   saver.restore(sess, ckpt.model_checkpoint_path)
+    # # # # #   # else:
+    # # # # #   #   print('No checkpoint file found')
+    # # # # #   #   return
+    # # # # #   # Start the queue runners.
+    # # # #   coord = tf.train.Coordinator()
     #   try:
     #     threads = []
     #     for qr in tf.get_collection(tf.GraphKeys.QUEUE_RUNNERS):
     #       threads.extend(qr.create_threads(sess, coord=coord, daemon=False,
     #                                        start=True))
-    #     patches = getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=8, ifPCA=True, n=16, BG=False)
+    #     patches = getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=8, ifPCA=True, n=16, BG=False, filterseg=True)
         # patches = getPatchDS_frompkl()
         #
-        # with open('patches_8_pascal_pca16_balanced_noBG_{}.pkl'.format(datetime.now()), 'wb') as f:
+        # with open('patches_8_pascal_pca16_balanced_noBG_overlap_1000im.pkl', 'wb') as f:
         #   pickle.dump(patches, f)
-
-        with open('patches_8_pascal_pca16_balanced_noBG_2025-02-02 12:34:41.083454.pkl', 'rb') as f:
+        #
+        # with open('patches_8_pascal_pca16_balanced_noBG_overlap.pkl', 'rb') as f:
+        #   patches = pickle.load(f)
+        with open('patches_8_pascal_pca16_balanced_noBG_overlap_1000im.pkl', 'rb') as f:
           patches = pickle.load(f)
         # with open('patches_8_pascal_pca16_balanced_noBG_2024-12-15 13:06:11.715102.pkl', 'rb') as f:
         #   patches = pickle.load(f)
@@ -3703,7 +3732,8 @@ def get_representations():
   # # # # #       # blocks_per_grid = ((4224+16-1)//16, (4224+16-1)//16)
   # # # # #       # patches_array = [p['patch'] for p in patches]
   # # # # #       # patches_cuda = cuda.to_device(patches_array)
-  #       doues = comb(new_patches, 2)
+  #       score_heu, score_haus, scores_lda = dist_methods_comparison(patches)
+  #       doues = comb(patches, 2)
   # #       # doues = [(d, lda) for d in doues]
   # # # # # # # # #       # dissim = calcPatchDistmulti(doues)
   #       data = []
@@ -3759,55 +3789,55 @@ def get_representations():
   #       counter = 11000
   #       dists = np.zeros(4000)
   #       with multiprocessing.Pool(processes=16) as p:
-  #         with tqdm(total=(len(patches) ** 2)) as pbar:
-  #           for d in p.map(calcPatchDistmulti, doues):
+  #         with tqdm(total=(len(patches) ** 2)/2) as pbar:
+  #           for d in p.imap_unordered(calcPatchDistmulti, doues):
   #             pbar.update()
-  # #             dists[d[1]-11000] = d[2]
-  # #             if d[1]==14999:#len(patches)-1:
-  # #               perc = np.percentile(dists, 3)
-  # #               idxs = np.where(dists<=perc) #np.logical_and(,dists > 0))
-  # #               for idx in idxs[0]:
-  # #                 dissim[counter, idx+11000] = dists[idx]
-  # #                 dissim[idx+11000, counter] = dists[idx]
-  # #               counter += 1
-  # #               dists = np.zeros(4000)
-  #               # dists = []
-  #               dissim[d[0], d[1]] = d[2]
-  #               dissim[d[1], d[0]] = d[2]
-        # try:
+  # # #             dists[d[1]-11000] = d[2]
+  # # #             if d[1]==14999:#len(patches)-1:
+  # # #               perc = np.percentile(dists, 3)
+  # # #               idxs = np.where(dists<=perc) #np.logical_and(,dists > 0))
+  # # #               for idx in idxs[0]:
+  # # #                 dissim[counter, idx+11000] = dists[idx]
+  # # #                 dissim[idx+11000, counter] = dists[idx]
+  # # #               counter += 1
+  # # #               dists = np.zeros(4000)
+  # #               # dists = []
+  #             dissim[d[0], d[1]] = d[2]
+  #             dissim[d[1], d[0]] = d[2]
+  #       # try:
+  #
+  #           # if pbar.n % 100000000==0:
+  #           #   np.savez_compressed('dissim_8_pascal_noBG_q10_fullDS.npz', dissim)
+  #           # with open('dissim_8_pascal_noBG_q10_fullDS.pkl', 'wb') as f:
+  #           #   pickle.dump(dissim, f, protocol=4)
+  #       # np.savez_compressed('dissim_8_pascal_noBG_q10_fullDS.npz', dissim)
+  #       # except:
+  #       #   continue
+  #       #       # dists.append([d[3], (d[0], d[1])])
+  # # # # #       # # for p1 in tqdm(patches):
+  # # # # #       # #   for p2 in patches:
+  # # # # #       # #     if dissim[p1['idx'], p2['idx']] != 0:
+  # # # # #       # #       continue
+  # # # # #       # #     else:
+  # # # # #       # #       # start = time.time()
+  # # # # #       # #       # patch1 = torch.from_numpy(p1['patch'])
+  # # # # #       # #       # patch2 = torch.from_numpy(p2['patch'])
+  # # # # #       # #       # dist = calcPatchDisttorch(patch1, patch2)
+  # # # # #       # #       dist = calcPatchDist(p1['patch'], p2['patch'])
+  # # # # #       # #       dissim[p1['idx'], p2['idx']] = dist
+  # # # # #       # #       dissim[p2['idx'], p1['idx']] = dist
+  # # # # #       # #       # print(time.time()-start)
+  # #       dissim = dissim[np.any(dissim != 0, axis=1), :][:, np.any(dissim != 0, axis=1)]
 
-            # if pbar.n % 100000000==0:
-            #   np.savez_compressed('dissim_8_pascal_noBG_q10_fullDS.npz', dissim)
-            # with open('dissim_8_pascal_noBG_q10_fullDS.pkl', 'wb') as f:
-            #   pickle.dump(dissim, f, protocol=4)
-        # np.savez_compressed('dissim_8_pascal_noBG_q10_fullDS.npz', dissim)
-        # except:
-        #   continue
-        #       # dists.append([d[3], (d[0], d[1])])
-  # # # #       # # for p1 in tqdm(patches):
-  # # # #       # #   for p2 in patches:
-  # # # #       # #     if dissim[p1['idx'], p2['idx']] != 0:
-  # # # #       # #       continue
-  # # # #       # #     else:
-  # # # #       # #       # start = time.time()
-  # # # #       # #       # patch1 = torch.from_numpy(p1['patch'])
-  # # # #       # #       # patch2 = torch.from_numpy(p2['patch'])
-  # # # #       # #       # dist = calcPatchDisttorch(patch1, patch2)
-  # # # #       # #       dist = calcPatchDist(p1['patch'], p2['patch'])
-  # # # #       # #       dissim[p1['idx'], p2['idx']] = dist
-  # # # #       # #       dissim[p2['idx'], p1['idx']] = dist
-  # # # #       # #       # print(time.time()-start)
-  #       dissim = dissim[np.any(dissim != 0, axis=1), :][:, np.any(dissim != 0, axis=1)]
 
-
-        # with open('dissim_8_pascal_noBG_q10_balanced_{}.pkl'.format(datetime.now()), 'wb') as f:
+        # with open('dissim_8_pascal_noBG_q10_balanced.pkl', 'wb') as f:
         #   pickle.dump(dissim, f)
-        with open('dissim_8_pascal_noBG_q10_balanced_2025-01-20 13:08:39.986150.pkl', 'rb') as f:
-          dissim = pickle.load(f)
+        # with open('dissim_8_pascal_noBG_q10_balanced_2025-01-20 13:08:39.986150.pkl', 'rb') as f:
+        #   dissim = pickle.load(f)
         # with open('dissim_8_minipascal_avg_filtered_q0_noBG_2024-02-07 11:26:37.549013.pkl', 'rb') as f:
         #   dissim = pickle.load(f)
-        # with open('dissim_8_pascal_avg_filtered_q0_noBG_balanced_2024-03-07 13:00:44.615576.pkl', 'rb') as f:
-        #   dissim = pickle.load(f)
+        with open('dissim_8_pascal_noBG_q10_balanced.pkl', 'rb') as f:
+          dissim = pickle.load(f)
   #       with open('dissim_8_pascal_avg_filtered_q50_2023-09-28 14:59:31.762212.pkl', 'rb') as f:
   #         dissim_q50 = pickle.load(f)
   #       with open('dissim_8_pascal_avg_filtered_q80_2023-09-27 16:45:36.574020.pkl', 'rb') as f:
@@ -3840,8 +3870,8 @@ def get_representations():
         vLens = [20]
         clustersCenterD = []
         inClustersD = []
-        # ns = range(50,201,30)
-        ns = [150]
+        ns = range(50,301,50)
+        # ns = [150]
         # fig2, ax2 = plt.subplots()
         segvals = [(p['seg']) for p in patches]
         classesPopDS = np.unique(segvals, return_counts=True, axis=0)
@@ -3854,6 +3884,7 @@ def get_representations():
         coverage = {}
         for n in tqdm(ns):
           MI_n = []
+          vLen=n
         #   ims_true = []
         #   ims_false = []
         #   space = eig[1][:, :n]
@@ -4115,473 +4146,484 @@ def get_representations():
         #         chance2classify[np.argmax(population[i, :])] += len(ps) / classesPopDS[1][np.argmax(population[i, :])]
         #     chance2cl[str(n)+'_'+str(n)+'_'+str(pu)] = chance2classify
         #   condHperC[str(n)+'_'+str(n)] = condHperClass
-          for vLen in vLens:
-            purity_train = []
-            purity_test = []
-            train_label = []
-            test_label = []
-            vLen=n
-            ims_true = []
-            ims_false = []
-            space = eigenVectors[:, :vLen]
-            normalize_f = cp.sqrt((np.sum(cp.square(space), axis=1)))
-            Y = (space.T / normalize_f).T
-            Kmeans = sklearn.cluster.KMeans(n_clusters=n, n_init=50)
-            im_ids = random.sample(range(np.max([p['im_id'] for p in patches])),
-                                   int(np.max([p['im_id'] for p in patches]) * 2/3))
-            patches_fit = [p['idx'] for p in patches if p['im_id'] in im_ids]
-            fit_sapce = Y[patches_fit, :]
-            clusters = Kmeans.fit(fit_sapce)
-            patches_predict = [p['idx'] for p in patches if p['im_id'] not in im_ids]
-            distsFromClustersCenter = clusters.transform(Y)
-            predict_space = Y[patches_predict, :]
-            predictions = Kmeans.predict(predict_space)
-            # temp = list(clusters.labels_)
-            # for i, pred in zip(patches_predict, predictions):
-            #   temp.insert(i, pred)
-            # clusters.labels_ = np.array(temp)
-            distsperCluster = [
-              (distsFromClustersCenter[np.array(patches_fit)[np.where(clusters.labels_ == i)]], np.array(patches_fit)[np.where(clusters.labels_ == i)]) for i in
-              range(n)]
-            patches2Include = [distsperCluster[i][1][np.where(
-              distsperCluster[i][0][:, i] <= np.percentile(distsperCluster[i][0][:, i], 100))[0]] for i in range(n)]
-            # clusters_trans = Kmeans.fit_transform(Y)
-            # clustersCenterD.append(np.mean(
-            #   [[np.linalg.norm((clusters.cluster_centers_[i, :]-clusters.cluster_centers_[j, :]), 2) for i in range(n)]
-            #    for j in range(n) if i != j]))
-            # inClustersD.append(np.mean([np.linalg.norm((Y[i]-clusters.cluster_centers_[clusters.labels_[i]]),2) for i in range(len(patches))]))
-          # # plot the change in the distances according to the size of the new patches descriptors
-          #   ax2.plot(vLens, clustersCenterD[-len(vLens):], label='between cluster mean distance n={}'.format(n))
-          #   ax2.plot(vLens, inClustersD[-len(vLens):], label='within clusters mean distance n={}'.format(n))
-          #   ax2.set_xlabel('# eig vec')
-          #   ax2.set_ylabel('mean distance')
-          #   ax2.legend()
-            # simulate and test the population of one cluster
-            population = np.zeros((n, len(classesPopDS[0])))
-            probs = np.zeros(population.shape)
-            # 0- Airplane 1- Airplane backgrouns 2- dog 3- dog background 4- elephant /
-            # 5- elephant background 6- fire hydrant 7- fire hydrant background 8- train 9- train background
-            clustersNames = range(n)
-            # labelsNames = ['bus', 'bus backgrouns', 'dog', 'dog background', 'pizza', 'pizza background', 'scissors',
-            #                'scissors background', 'airplane', 'airplane background']
-            # labelsNames = ['Airplane', 'Airplane backgrouns', 'dog', 'dog background', 'elephant',
-            #                'elephant background', 'fire hydrant', 'fire hydrant background', 'train', 'train background']
-            counter = np.zeros((1, n))
-            for clusterIDX in range(n):
-              # idxlist = np.where(clusters.labels_ == clusterIDX)
-              idxlist = np.concatenate([patches2Include[clusterIDX], np.array(patches_predict)[np.where(predictions==clusterIDX)]])
-              #       print(len(idxlist[0])/len(patches))
-              gt_train = [(p['seg']) for p in patches if p['idx'] in patches2Include[clusterIDX]]
-              gt_test = [(p['seg']) for p in patches if
-                         p['idx'] in np.array(patches_predict)[np.where(predictions == clusterIDX)]]
-              train_pop = np.unique(gt_train, return_counts=True, axis=0)
-              test_pop = np.unique(gt_test, return_counts=True, axis=0)
-              purity_train.append(np.max(train_pop[1])/sum(train_pop[1]))
-              train_label.append(train_pop[0][np.argmax(train_pop[1])])
-              try:
-                purity_test.append(np.max(test_pop[1])/sum(test_pop[1]))
-                test_label.append(test_pop[0][np.argmax(test_pop[1])])
-              except:
-                purity_test.append(None)
-                test_label.append(None)
-              GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
-              classesPop = np.unique(gt_train, return_counts=True, axis=0) #np.unique(GT_cluster, return_counts=True, axis=0)
-              max_Pclass = copy.deepcopy(classesPop[0])[np.argmax(classesPop[1])]
-              for i, pop in enumerate(classesPop[0]):
-                val = list(classesIdx.values()).index(pop)
-                # population[clusterIDX, val] = classesPop[1][i] / len(idxlist[0])
-                # if b'bus' in pop and b'255' in pop:
-                #   val = 0
-                # if b'bus' in pop and b'0' in pop:
-                #   val = 1
-                # if b'dog' in pop and b'255' in pop:
-                #   val = 2
-                # if b'dog' in pop and b'0' in pop:
-                #   val = 3
-                # if b'pizza' in pop and b'255' in pop:
-                #   val = 4
-                # if b'pizza' in pop and b'0' in pop:
-                #   val = 5
-                # if b'scissors' in pop and b'255' in pop:
-                #   val = 6
-                # if b'scissors' in pop and b'0' in pop:
-                #   val = 7
-                # if b'airplane' in pop and b'255' in pop:
-                #   val = 8
-                # if b'airplane' in pop and b'0' in pop:
-                #   val = 9
-                classesPop[0][i] = val
-                population[clusterIDX, int(classesPop[0][i])] = classesPop[1][i] / sum(classesPop[1])
-                probs[clusterIDX, int(classesPop[0][i])] = classesPop[1][i]/len(patches)
-              # max_Pclass = classesPop[0][np.argmax(classesPop[1])]
-              try:
-                true_im = [p['ref'] for p in patches if
-                           (p['idx'] in idxlist and max_Pclass == p['seg'])]
-                ims_true.append(random.sample(true_im, k=np.min([5, len(true_im)])))
-              except:
-                print(max_Pclass)
-              false_im = [p['ref'] for p in patches if (
-                        p['idx'] in idxlist and max_Pclass != p['seg'])]
-              try:
-                ims_false.append(random.sample(false_im, k=5))
-              except:
-                ims_false.append(false_im)
-              counter[0, clusterIDX] = np.sum(classesPop[1])
-            # #       for i, pop in enumerate(classesPop[0]):
-            # #         if b'elephant' in pop and b'255' in pop:
-            # #           val = 4
-            # #         if b'elephant' in pop and b'0' in pop:
-            # #           val = 5
-            # #         if b'dog' in pop and b'255' in pop:
-            # #           val = 2
-            # #         if b'dog' in pop and b'0' in pop:
-            # #           val = 3
-            # #         if b'fire hydrant' in pop and b'255' in pop:
-            # #           val = 6
-            # #         if b'fire hydrant' in pop and b'0' in pop:
-            # #           val = 7
-            # #         if b'train' in pop and b'255' in pop:
-            # #           val = 8
-            # #         if b'train' in pop and b'0' in pop:
-            # #           val = 9
-            # #         if b'airplane' in pop and b'255' in pop:
-            # #           val = 0
-            # #         if b'airplane' in pop and b'0' in pop:
-            # #           val = 1
-            # #         classesPop[0][i] = val
-            # #         population[clusterIDX, int(classesPop[0][i][0])] = classesPop[1][i]
-            # #         counter[val] += 1
-            MI1 = sklearn.metrics.mutual_info_score([p['seg'] for p in patches if p['idx'] in np.hstack(patches2Include)], clusters.labels_)#[clusters.labels_[i] for i in range(len(clusters.labels_)) if i in np.hstack(patches2Include)])
-            MI_n.append(MI1)
-            clusters2show = {}
+          purity_train = []
+          test_score = []
+          purity_val = []
+          train_label = []
+          test_label = []
+          val_label = []
 
-            sortbyH = [sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0]) for i in range(n)]
-            sortbyclass = [np.argmax(population[i, :]) for i in range(n)]
-            sortedclustersIdx = np.lexsort((sortbyH, sortbyclass))
-            # create similarity hists
-            patchesBycluster = np.hstack(patches2Include)
-            # distsFromClustersCenter = clusters.transform(Y)
-            # distsperCluster = [distsFromClustersCenter[np.where(clusters.labels_ == i)] for i in range(n)]
-            for k in range(n):
-              i = sortedclustersIdx[k]
-              if str(np.argmax(population[i, :])) in clusters2show.keys():
-                continue
-                # if clusters2show[str(np.argmax(population[i, :]))]==2:
-                #   continue
-                # else:
-                #   clusters2show[str(np.argmax(population[i, :]))] = 2
-              else:
-                clusters2show[str(np.argmax(population[i, :]))]=1
-            numOfRows = sum(clusters2show.values())+5
-            fig, axs = plt.subplots(numOfRows, 17, figsize=(numOfRows, 17),
-                                    gridspec_kw={'width_ratios': [2, 1, 1, 1, 1, 1, 1, 0.2, 1, 1, 1, 1, 1, 0.2, 2, 0.2, 2]})
-            plt.subplots_adjust(hspace=0.4)
-            # fig.suptitle('{} clusters, MI = {}'.format(n, MI1))
-            # plt.subplots_adjust(wspace=0.05, hspace=0.6)  # , left=2, right=2.2)
+          ims_true = []
+          ims_false = []
+          space = eigenVectors[:, :vLen]
+          normalize_f = np.sqrt((np.sum(np.square(space), axis=1)))
+          Y = (space.T / normalize_f).T
+          Kmeans = sklearn.cluster.KMeans(n_clusters=n, n_init=300)
+          idx_trainval, idx_test = train_test_split(np.unique([p['im_id'] for p in patches]), test_size=0.2, random_state=42)
+          idx_train, idx_val = train_test_split(idx_trainval, test_size=0.25, random_state=42)
+          # im_ids = random.sample(range(np.max([p['im_id'] for p in patches])),
+          #                        int(np.max([p['im_id'] for p in patches]) * 2/3))
+          patches_train = [p['idx'] for p in patches if p['im_id'] in idx_train]
+          fit_sapce = Y[idx_train, :]
+          clusters = Kmeans.fit(fit_sapce)
+          patches_val = [p['idx'] for p in patches if p['im_id'] in idx_val]
+          distsFromClustersCenter = clusters.transform(Y)
+          val_space = Y[patches_val, :]
+          patches_test = [p['idx'] for p in patches if p['im_id'] in idx_test]
+          test_space = Y[patches_test, :]
+          predictions4label = Kmeans.predict(val_space)
+          pred4test = Kmeans.predict(test_space)
+          # temp = list(clusters.labels_)
+          # for i, pred in zip(patches_predict, predictions):
+          #   temp.insert(i, pred)
+          # clusters.labels_ = np.array(temp)
+          distsperCluster = [
+            (distsFromClustersCenter[np.array(patches_train)[np.where(clusters.labels_ == i)]], np.array(patches_train)[np.where(clusters.labels_ == i)]) for i in
+            range(n)]
+          patches2Include = [distsperCluster[i][1][np.where(
+            distsperCluster[i][0][:, i] <= np.percentile(distsperCluster[i][0][:, i], 100))[0]] for i in range(n)]
+          # clusters_trans = Kmeans.fit_transform(Y)
+          # clustersCenterD.append(np.mean(
+          #   [[np.linalg.norm((clusters.cluster_centers_[i, :]-clusters.cluster_centers_[j, :]), 2) for i in range(n)]
+          #    for j in range(n) if i != j]))
+          # inClustersD.append(np.mean([np.linalg.norm((Y[i]-clusters.cluster_centers_[clusters.labels_[i]]),2) for i in range(len(patches))]))
+        # # plot the change in the distances according to the size of the new patches descriptors
+        #   ax2.plot(vLens, clustersCenterD[-len(vLens):], label='between cluster mean distance n={}'.format(n))
+        #   ax2.plot(vLens, inClustersD[-len(vLens):], label='within clusters mean distance n={}'.format(n))
+        #   ax2.set_xlabel('# eig vec')
+        #   ax2.set_ylabel('mean distance')
+        #   ax2.legend()
+          # simulate and test the population of one cluster
+          population = np.zeros((n, len(classesPopDS[0])))
+          probs = np.zeros(population.shape)
+          # 0- Airplane 1- Airplane backgrouns 2- dog 3- dog background 4- elephant /
+          # 5- elephant background 6- fire hydrant 7- fire hydrant background 8- train 9- train background
+          clustersNames = range(n)
+          # labelsNames = ['bus', 'bus backgrouns', 'dog', 'dog background', 'pizza', 'pizza background', 'scissors',
+          #                'scissors background', 'airplane', 'airplane background']
+          # labelsNames = ['Airplane', 'Airplane backgrouns', 'dog', 'dog background', 'elephant',
+          #                'elephant background', 'fire hydrant', 'fire hydrant background', 'train', 'train background']
+          counter = np.zeros((1, n))
+          for clusterIDX in range(n):
+            # idxlist = np.where(clusters.labels_ == clusterIDX)
+            idxlist = np.concatenate([np.array(patches_train)[np.where(clusters.labels_==clusterIDX)], np.array(patches_val)[np.where(predictions4label==clusterIDX)]])
+            #       print(len(idxlist[0])/len(patches))
+            gt_train = [(p['seg']) for p in patches if p['idx'] in np.array(patches_train)[np.where(clusters.labels_==clusterIDX)]]
+            gt_val = [(p['seg']) for p in patches if p['idx'] in np.array(patches_val)[np.where(predictions4label == clusterIDX)]]
+            gt_test = [(p['seg']) for p in patches if p['idx'] in np.array(patches_test)[np.where(pred4test == clusterIDX)]]
+            train_pop = np.unique(gt_train, return_counts=True, axis=0)
+            val_pop = np.unique(gt_val, return_counts=True, axis=0)
+            test_pop = np.unique(gt_test, return_counts=True, axis=0)
+            purity_train.append(np.max(train_pop[1])/sum(train_pop[1]))
+            train_label.append(train_pop[0][np.argmax(train_pop[1])])
+            try:
+              purity_val.append(np.max(val_pop[1])/sum(val_pop[1]))
+              val_label.append(val_pop[0][np.argmax(val_pop[1])])
+            except:
+              purity_val.append(None)
+              val_label.append(None)
+            try:
+              test_score.append(test_pop[1][np.where(test_pop[0]==val_label[-1])] / sum(test_pop[1]))
+            except:
+              test_score.append(0)
+            GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
+            classesPop = np.unique(gt_val, return_counts=True, axis=0) #np.unique(GT_cluster, return_counts=True, axis=0)
+            # max_Pclass = copy.deepcopy(classesPop[0])[np.argmax(classesPop[1])]
+            for i, pop in enumerate(classesPop[0]):
+              val = list(classesIdx.values()).index(pop)
+              # population[clusterIDX, val] = classesPop[1][i] / len(idxlist[0])
+              # if b'bus' in pop and b'255' in pop:
+              #   val = 0
+              # if b'bus' in pop and b'0' in pop:
+              #   val = 1
+              # if b'dog' in pop and b'255' in pop:
+              #   val = 2
+              # if b'dog' in pop and b'0' in pop:
+              #   val = 3
+              # if b'pizza' in pop and b'255' in pop:
+              #   val = 4
+              # if b'pizza' in pop and b'0' in pop:
+              #   val = 5
+              # if b'scissors' in pop and b'255' in pop:
+              #   val = 6
+              # if b'scissors' in pop and b'0' in pop:
+              #   val = 7
+              # if b'airplane' in pop and b'255' in pop:
+              #   val = 8
+              # if b'airplane' in pop and b'0' in pop:
+              #   val = 9
+              # classesPop[0][i] = val
+              population[clusterIDX, val] = classesPop[1][i] / sum(classesPop[1])
+              probs[clusterIDX, val] = classesPop[1][i]/len(patches)
+            # max_Pclass = classesPop[0][np.argmax(classesPop[1])]
+            try:
+              true_im = [p['ref'] for p in patches if
+                         (p['idx'] in idxlist and val_label[-1] == p['seg'])]
+              ims_true.append(random.sample(true_im, k=np.min([5, len(true_im)])))
+            except:
+              ims_true.append(true_im)
+              # print(max_Pclass)
+            false_im = [p['ref'] for p in patches if (p['idx'] in idxlist and val_label != p['seg'])]
+            try:
+              ims_false.append(random.sample(false_im, k=5))
+            except:
+              ims_false.append(false_im)
+            counter[0, clusterIDX] = np.sum(classesPop[1])
+          # #       for i, pop in enumerate(classesPop[0]):
+          # #         if b'elephant' in pop and b'255' in pop:
+          # #           val = 4
+          # #         if b'elephant' in pop and b'0' in pop:
+          # #           val = 5
+          # #         if b'dog' in pop and b'255' in pop:
+          # #           val = 2
+          # #         if b'dog' in pop and b'0' in pop:
+          # #           val = 3
+          # #         if b'fire hydrant' in pop and b'255' in pop:
+          # #           val = 6
+          # #         if b'fire hydrant' in pop and b'0' in pop:
+          # #           val = 7
+          # #         if b'train' in pop and b'255' in pop:
+          # #           val = 8
+          # #         if b'train' in pop and b'0' in pop:
+          # #           val = 9
+          # #         if b'airplane' in pop and b'255' in pop:
+          # #           val = 0
+          # #         if b'airplane' in pop and b'0' in pop:
+          # #           val = 1
+          # #         classesPop[0][i] = val
+          # #         population[clusterIDX, int(classesPop[0][i][0])] = classesPop[1][i]
+          # #         counter[val] += 1
+          MI1 = sklearn.metrics.mutual_info_score([p['seg'] for p in patches if p['idx'] in np.hstack(patches2Include)], clusters.labels_)#[clusters.labels_[i] for i in range(len(clusters.labels_)) if i in np.hstack(patches2Include)])
+          MI_n.append(MI1)
+          clusters2show = {}
 
-            dis4Hist = np.zeros(dissim.shape)
-            clustersSize = np.unique([clusters.labels_[i] for i in range(len(clusters.labels_)) if i in np.hstack(patches2Include)], return_counts=True)
-            for i in range(len(patchesBycluster)):
-              dis4Hist[i, :] = dissim[patchesBycluster[i], :]
-            dissim_forcopy = copy.deepcopy(dis4Hist)
-            for i in range(len(patchesBycluster)):
-              dis4Hist[:, i] = dissim_forcopy[:, patchesBycluster[i]]
-            dis4Hist = dis4Hist[:np.hstack(patches2Include).shape[0], :np.hstack(patches2Include).shape[0]]
-            dists_within_cluster = []
-            for i in range(n):
-              if i == 0:
-                dists_within_cluster.append(dis4Hist[:clustersSize[1][i], :clustersSize[1][i]])
-              # elif i == n-1:
-              #   dists_within_cluster.append(dis4Hist[-clustersSize[1][i]:, -clustersSize[1][i]:])
-              else:
-                dists_within_cluster.append(dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
-                                          sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)])])
+          sortbyH = [sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0]) for i in range(n)]
+          sortbyclass = [np.argmax(population[i, :]) for i in range(n)]
+          sortedclustersIdx = np.lexsort((sortbyH, sortbyclass))
+          # create similarity hists
+          patchesBycluster = np.hstack(patches2Include)
+          # distsFromClustersCenter = clusters.transform(Y)
+          # distsperCluster = [distsFromClustersCenter[np.where(clusters.labels_ == i)] for i in range(n)]
+          for k in range(n):
+            i = sortedclustersIdx[k]
+            if str(np.argmax(population[i, :])) in clusters2show.keys():
+              continue
+              # if clusters2show[str(np.argmax(population[i, :]))]==2:
+              #   continue
+              # else:
+              #   clusters2show[str(np.argmax(population[i, :]))] = 2
+            else:
+              clusters2show[str(np.argmax(population[i, :]))]=1
+          numOfRows = sum(clusters2show.values())+5
+          fig, axs = plt.subplots(numOfRows, 17, figsize=(numOfRows, 17),
+                                  gridspec_kw={'width_ratios': [2, 1, 1, 1, 1, 1, 1, 0.2, 1, 1, 1, 1, 1, 0.2, 2, 0.2, 2]})
+          plt.subplots_adjust(hspace=0.4)
+          # fig.suptitle('{} clusters, MI = {}'.format(n, MI1))
+          # plt.subplots_adjust(wspace=0.05, hspace=0.6)  # , left=2, right=2.2)
 
-            dists_between_cluster = []
-            for i in range(n):
-              if i == 0:
-                dists_between_cluster.append(dis4Hist[:clustersSize[1][i], clustersSize[1][i]:])
-              # elif i == n-1:
-              #   dists_between_cluster.append(dis4Hist[-clustersSize[1][i]:, :-clustersSize[1][i]])
-              else:
-                dists_between_cluster.append(np.hstack((dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
-                                                      :sum(clustersSize[1][:i])],
-                                                      dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
-                                                      sum(clustersSize[1][:(i + 1)]):])))
-            clusters2show = {}
-            condH = []
-          ### old plots start here
-          #   for k in range(n):
-          #     i = sortedclustersIdx[k]
-          #     idxlist = np.where(clusters.labels_ == i)
-          #     #       print(len(idxlist[0])/len(patches))
-          #     GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist[0]]
-          #     classesPop = np.unique(GT_cluster, return_counts=True, axis=0)
-          #     # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
-          #     clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
-          #     condH.append(clusterscondH)
-          #   #   barvals = []
-          #   #   for c in classesPopDS[0]:
-          #   #     if c in classesPop[0]:
-          #   #       barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
-          #   #     else:
-          #   #       barvals.append(0)
-          #   #   ticks = range(18)
-          #   #   # gs = axs[i, -2].get_gridspec()
-          #   #   # remove the underlying axes
-          #   #   # for ax in axs[i, 10:]:
-          #   #   #   ax.remove()
-          #   #   # axbig = fig.add_subplot(gs[i, 10:])
-          #   #   axs[k, 0].set_ylabel(
-          #   #     'cluster no.{} \n H={:.4f},\n dominant class:{} \n p_class={:.4f}'.format(i, clusterscondH, np.argmax(population[i, :]), np.max(population[i, :])),
-          #   #     rotation=0, size='medium', loc='bottom')
-          #   #   for j in range(14):
-          #   #     if j == 0:
-          #   #       plt.setp(axs[k, j].spines.values(), color='white')
-          #   #       axs[k, j].set_xticks([])
-          #   #       axs[k, j].set_yticks([])
-          #   #     elif j < 6:
-          #   #       axs[k, j].imshow(ims_true[i][j - 1])
-          #   #       axs[k, j].set_xticks([])
-          #   #       axs[k, j].set_yticks([])
-          #   #       # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
-          #   #     elif j == 6:
-          #   #       axs[k, j].remove()
-          #   #     elif j < 12:
-          #   #       try:
-          #   #         axs[k, j].imshow(ims_false[i][j - 7])
-          #   #         axs[k, j].set_xticks([])
-          #   #         axs[k, j].set_yticks([])
-          #   #         # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
-          #   #       except:
-          #   #         plt.setp(axs[k, j].spines.values(), color='white')
-          #   #         axs[k, j].set_xticks([])
-          #   #         axs[k, j].set_yticks([])
-          #   #     elif j==12:
-          #   #       # ticks = range(len(classesPop[1]))
-          #   #       axs[k, j].bar(ticks, barvals, align='center')
-          #   #       axs[k, j].set_xticks(ticks)
-          #   #       axs[k, j].tick_params(axis='x', rotation=0)
-          #   #       # axs[i,j].hist(GT_cluster, )
-          #   #     else:
-          #   #       axs[k, j].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
-          #   #       axs[k, j].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
-          #   #
-          #   # fig.align_ylabels()
-          #   # # fig.tight_layout()
-          #   # plt.savefig(
-          #   #   'Thesis figures/pascal/clustering/noBG/{}_clusters_{}_eigvecs_{:.4f}_MI.png'.format(n, vLen, MI1),
-          #   #   bbox_inches='tight')
-          #   # plt.close(fig)
-          #
-          #   conHs[str(n) + ' ' + str(vLen)] = condH
-          #   condHperClass = {}
-          #   for m in range(len(classesPopDS[0])):
-          #     Hs = []
-          #     for i, c in enumerate(patches2Include):
-          #       ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i,:])==np.flatnonzero(list(classesIdx.values())==p['seg']))]
-          #       # if np.max(population[i,:]) >= purity:
-          #       #   chance2classify[np.argmax(population[i,:])] += len(ps)/classesPopDS[1][np.argmax(population[i,:])]
-          #       for p in ps:
-          #         # print(type(classesIdx[m]))
-          #         if p['seg'] == classesIdx[m]:
-          #           Hs.append(condH[i])
-          #     condHperClass[m] = Hs
-          #   for pu in purity:
-          #     chance2classify = np.zeros(len(classesPopDS[0]))
-          #     cov = np.zeros(len(classesPopDS[0]))
-          #     for i, c in enumerate(patches2Include):
-          #       ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i, :]) == np.flatnonzero(
-          #         list(classesIdx.values()) == p['seg']))]
-          #       if np.max(population[i, :]) >= pu:
-          #         chance2classify[np.argmax(population[i, :])] += len(ps) / classesPopDS[1][np.argmax(population[i, :])]
-          #         cov[np.argmax(population[i, :])] += len(ps)
-          #     chance2cl[str(n)+'_'+str(pu)] = chance2classify
-          #     coverage[str(vLen)+'_'+str(pu)] = cov
-          #   condHperC[str(n)+'_'+str(vLen)] = condHperClass
-          # MIs[str(n)] = MI_n
-            for k in range(n):
-              ind = 0
-              if clusters2show.values():
-                ind = sum(clusters2show.values())
-              i = sortedclustersIdx[k]
+          dis4Hist = np.zeros(dissim.shape)
+          clustersSize = np.unique([clusters.labels_[i] for i in range(len(clusters.labels_)) if i in np.hstack(patches2Include)], return_counts=True)
+          for i in range(len(patchesBycluster)):
+            dis4Hist[i, :] = dissim[patchesBycluster[i], :]
+          dissim_forcopy = copy.deepcopy(dis4Hist)
+          for i in range(len(patchesBycluster)):
+            dis4Hist[:, i] = dissim_forcopy[:, patchesBycluster[i]]
+          dis4Hist = dis4Hist[:np.hstack(patches2Include).shape[0], :np.hstack(patches2Include).shape[0]]
+          dists_within_cluster = []
+          for i in range(n):
+            if i == 0:
+              dists_within_cluster.append(dis4Hist[:clustersSize[1][i], :clustersSize[1][i]])
+            # elif i == n-1:
+            #   dists_within_cluster.append(dis4Hist[-clustersSize[1][i]:, -clustersSize[1][i]:])
+            else:
+              dists_within_cluster.append(dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
+                                        sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)])])
 
-              idxlist = np.concatenate([np.array(patches_fit)[np.where(clusters.labels_ == i)], np.array(patches_predict)[np.where(predictions==i)]])
-              #       print(len(idxlist[0])/len(patches))
-              GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
-              gt_train = [(p['seg']) for p in patches if p['idx'] in np.array(patches_fit)[np.where(clusters.labels_ == i)]]
-              gt_test = [(p['seg']) for p in patches if
-                         p['idx'] in np.array(patches_predict)[np.where(predictions == i)]]
-              classesPop = np.unique(gt_train, return_counts=True, axis=0)
-              # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
-              clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
-              condH.append(clusterscondH)
-              if str(np.argmax(population[i, :])) in clusters2show.keys():
-                continue
-                # if clusters2show[str(np.argmax(population[i, :]))]==2:
-                #   continue
-                # else:
-                #   clusters2show[str(np.argmax(population[i, :]))] = 2
+          dists_between_cluster = []
+          for i in range(n):
+            if i == 0:
+              dists_between_cluster.append(dis4Hist[:clustersSize[1][i], clustersSize[1][i]:])
+            # elif i == n-1:
+            #   dists_between_cluster.append(dis4Hist[-clustersSize[1][i]:, :-clustersSize[1][i]])
+            else:
+              dists_between_cluster.append(np.hstack((dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
+                                                    :sum(clustersSize[1][:i])],
+                                                    dis4Hist[sum(clustersSize[1][:i]):sum(clustersSize[1][:(i + 1)]),
+                                                    sum(clustersSize[1][:(i + 1)]):])))
+          clusters2show = {}
+          condH = []
+        ### old plots start here
+        #   for k in range(n):
+        #     i = sortedclustersIdx[k]
+        #     idxlist = np.where(clusters.labels_ == i)
+        #     #       print(len(idxlist[0])/len(patches))
+        #     GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist[0]]
+        #     classesPop = np.unique(GT_cluster, return_counts=True, axis=0)
+        #     # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
+        #     clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
+        #     condH.append(clusterscondH)
+        #   #   barvals = []
+        #   #   for c in classesPopDS[0]:
+        #   #     if c in classesPop[0]:
+        #   #       barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
+        #   #     else:
+        #   #       barvals.append(0)
+        #   #   ticks = range(18)
+        #   #   # gs = axs[i, -2].get_gridspec()
+        #   #   # remove the underlying axes
+        #   #   # for ax in axs[i, 10:]:
+        #   #   #   ax.remove()
+        #   #   # axbig = fig.add_subplot(gs[i, 10:])
+        #   #   axs[k, 0].set_ylabel(
+        #   #     'cluster no.{} \n H={:.4f},\n dominant class:{} \n p_class={:.4f}'.format(i, clusterscondH, np.argmax(population[i, :]), np.max(population[i, :])),
+        #   #     rotation=0, size='medium', loc='bottom')
+        #   #   for j in range(14):
+        #   #     if j == 0:
+        #   #       plt.setp(axs[k, j].spines.values(), color='white')
+        #   #       axs[k, j].set_xticks([])
+        #   #       axs[k, j].set_yticks([])
+        #   #     elif j < 6:
+        #   #       axs[k, j].imshow(ims_true[i][j - 1])
+        #   #       axs[k, j].set_xticks([])
+        #   #       axs[k, j].set_yticks([])
+        #   #       # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
+        #   #     elif j == 6:
+        #   #       axs[k, j].remove()
+        #   #     elif j < 12:
+        #   #       try:
+        #   #         axs[k, j].imshow(ims_false[i][j - 7])
+        #   #         axs[k, j].set_xticks([])
+        #   #         axs[k, j].set_yticks([])
+        #   #         # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
+        #   #       except:
+        #   #         plt.setp(axs[k, j].spines.values(), color='white')
+        #   #         axs[k, j].set_xticks([])
+        #   #         axs[k, j].set_yticks([])
+        #   #     elif j==12:
+        #   #       # ticks = range(len(classesPop[1]))
+        #   #       axs[k, j].bar(ticks, barvals, align='center')
+        #   #       axs[k, j].set_xticks(ticks)
+        #   #       axs[k, j].tick_params(axis='x', rotation=0)
+        #   #       # axs[i,j].hist(GT_cluster, )
+        #   #     else:
+        #   #       axs[k, j].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
+        #   #       axs[k, j].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
+        #   #
+        #   # fig.align_ylabels()
+        #   # # fig.tight_layout()
+        #   # plt.savefig(
+        #   #   'Thesis figures/pascal/clustering/noBG/{}_clusters_{}_eigvecs_{:.4f}_MI.png'.format(n, vLen, MI1),
+        #   #   bbox_inches='tight')
+        #   # plt.close(fig)
+        #
+        #   conHs[str(n) + ' ' + str(vLen)] = condH
+        #   condHperClass = {}
+        #   for m in range(len(classesPopDS[0])):
+        #     Hs = []
+        #     for i, c in enumerate(patches2Include):
+        #       ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i,:])==np.flatnonzero(list(classesIdx.values())==p['seg']))]
+        #       # if np.max(population[i,:]) >= purity:
+        #       #   chance2classify[np.argmax(population[i,:])] += len(ps)/classesPopDS[1][np.argmax(population[i,:])]
+        #       for p in ps:
+        #         # print(type(classesIdx[m]))
+        #         if p['seg'] == classesIdx[m]:
+        #           Hs.append(condH[i])
+        #     condHperClass[m] = Hs
+        #   for pu in purity:
+        #     chance2classify = np.zeros(len(classesPopDS[0]))
+        #     cov = np.zeros(len(classesPopDS[0]))
+        #     for i, c in enumerate(patches2Include):
+        #       ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i, :]) == np.flatnonzero(
+        #         list(classesIdx.values()) == p['seg']))]
+        #       if np.max(population[i, :]) >= pu:
+        #         chance2classify[np.argmax(population[i, :])] += len(ps) / classesPopDS[1][np.argmax(population[i, :])]
+        #         cov[np.argmax(population[i, :])] += len(ps)
+        #     chance2cl[str(n)+'_'+str(pu)] = chance2classify
+        #     coverage[str(vLen)+'_'+str(pu)] = cov
+        #   condHperC[str(n)+'_'+str(vLen)] = condHperClass
+        # MIs[str(n)] = MI_n
+          for k in range(n):
+            ind = 0
+            if clusters2show.values():
+              ind = sum(clusters2show.values())
+            i = sortedclustersIdx[k]
+
+            idxlist = np.concatenate([np.array(patches_train)[np.where(clusters.labels_ == i)], np.array(patches_train)[np.where(predictions4label==i)]])
+            #       print(len(idxlist[0])/len(patches))
+            GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
+            gt_train = [(p['seg']) for p in patches if p['idx'] in np.array(patches_train)[np.where(clusters.labels_ == i)]]
+            gt_val = [(p['seg']) for p in patches if
+                       p['idx'] in np.array(patches_val)[np.where(predictions4label == i)]]
+            classesPop = np.unique(gt_train, return_counts=True, axis=0)
+            # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
+            clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
+            condH.append(clusterscondH)
+            if str(np.argmax(population[i, :])) in clusters2show.keys():
+              continue
+              # if clusters2show[str(np.argmax(population[i, :]))]==2:
+              #   continue
+              # else:
+              #   clusters2show[str(np.argmax(population[i, :]))] = 2
+            else:
+              clusters2show[str(np.argmax(population[i, :]))]=1
+            barvals = []
+            for c in classesPopDS[0]:
+              if c in classesPop[0]:
+                barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
               else:
-                clusters2show[str(np.argmax(population[i, :]))]=1
-              barvals = []
-              for c in classesPopDS[0]:
-                if c in classesPop[0]:
-                  barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
-                else:
-                  barvals.append(0)
-            #   ticks = range(18)
-            #   # gs = axs[i, -2].get_gridspec()
-            #   # remove the underlying axes
-            #   # for ax in axs[i, 10:]:
-            #   #   ax.remove()
-            #   # axbig = fig.add_subplot(gs[i, 10:])
-              axs[ind, 0].set_ylabel(
-                'cluster no.{} \n H={:.4f} #im={}'.format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
-                rotation=0, size='medium', loc='center')
-              axs[ind, 1].set_ylabel(
-                'dominant class:{} \n p_class={:.4f}'.format(classesPopDS[0][np.argmax(population[i, :])], np.max(population[i, :])),
-                rotation=0, size='medium', loc='center')
-              for j in range(15):
-                if j == 0 or j==1:
+                barvals.append(0)
+          #   ticks = range(18)
+          #   # gs = axs[i, -2].get_gridspec()
+          #   # remove the underlying axes
+          #   # for ax in axs[i, 10:]:
+          #   #   ax.remove()
+          #   # axbig = fig.add_subplot(gs[i, 10:])
+            axs[ind, 0].set_ylabel(
+              'cluster no.{} \n H={:.4f} #im={}'.format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
+              rotation=0, size='medium', loc='center')
+            axs[ind, 1].set_ylabel(
+              'label:{} \n test score={:.4f}'.format(classesPopDS[0][np.argmax(population[i, :])], np.max(population[i, :])),
+              rotation=0, size='medium', loc='center')
+            for j in range(15):
+              if j == 0 or j==1:
+                plt.setp(axs[ind, j].spines.values(), color='white')
+                axs[ind, j].set_xticks([])
+                axs[ind, j].set_yticks([])
+              elif j < 7:
+                try:
+                  axs[ind, j].imshow(ims_true[i][j - 2])
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+                except:
                   plt.setp(axs[ind, j].spines.values(), color='white')
                   axs[ind, j].set_xticks([])
                   axs[ind, j].set_yticks([])
-                elif j < 7:
-                  try:
-                    axs[ind, j].imshow(ims_true[i][j - 2])
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                  except:
-                    plt.setp(axs[ind, j].spines.values(), color='white')
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                  # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
-                elif j == 7:
-                  axs[ind, j].remove()
-                elif j < 13:
-                  try:
-                    axs[ind, j].imshow(ims_false[i][j - 8])
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                    # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
-                  except:
-                    plt.setp(axs[ind, j].spines.values(), color='white')
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                elif j==13:
-                  axs[ind, j].remove()
-                elif j < 15:
-                  ticks = range(len(barvals))
-                  axs[ind, j].bar(ticks, barvals, align='center')
-                  # axs[ind, j].set_xticks(ticks)
-                  axs[ind, j].tick_params(axis='x', rotation=0)
-                  # axs[i,j].hist(GT_cluster, )
-                  axs[ind, j+1].remove()
-                  axs[ind, j+2].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
-                  axs[ind, j+2].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
-
-            for ind, k in enumerate(np.argsort(sortbyH)[-5:]):
-
-              i = k
-              ind += sum(clusters2show.values())
-              idxlist = np.where(clusters.labels_ == i)[0]
-              #       print(len(idxlist[0])/len(patches))
-              print(idxlist)
-              GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
-              classesPop = np.unique(GT_cluster, return_counts=True, axis=0)
-              # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
-              clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
-              condH.append(clusterscondH)
-              barvals = []
-              for c in classesPopDS[0]:
-                if c in classesPop[0]:
-                  barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
-                else:
-                  barvals.append(0)
-            #   ticks = range(18)
-            #   # gs = axs[i, -2].get_gridspec()
-            #   # remove the underlying axes
-            #   # for ax in axs[i, 10:]:
-            #   #   ax.remove()
-            #   # axbig = fig.add_subplot(gs[i, 10:])
-              axs[ind, 0].set_ylabel(
-                'cluster no.{} \n H={:.4f} #im={}' .format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
-                rotation=0, size='small', loc='center')
-              axs[ind, 1].set_ylabel(
-                'dominant class:{} \n p_class={:.4f}'.format(classesPopDS[0][np.argmax(population[i, :])],
-                                                                                          np.max(population[i, :])),
-                rotation=0, size='small', loc='center')
-              for j in range(15):
-                if j == 0 or j==1:
+                # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
+              elif j == 7:
+                axs[ind, j].remove()
+              elif j < 13:
+                try:
+                  axs[ind, j].imshow(ims_false[i][j - 8])
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+                  # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
+                except:
                   plt.setp(axs[ind, j].spines.values(), color='white')
                   axs[ind, j].set_xticks([])
                   axs[ind, j].set_yticks([])
-                elif j < 7:
-                  try:
-                    axs[ind, j].imshow(ims_true[i][j - 2])
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                  except:
-                    plt.setp(axs[ind, j].spines.values(), color='white')
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                  # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
-                elif j == 7:
-                  axs[ind, j].remove()
-                elif j < 13:
-                  try:
-                    axs[ind, j].imshow(ims_false[i][j - 8])
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                    # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
-                  except:
-                    plt.setp(axs[ind, j].spines.values(), color='white')
-                    axs[ind, j].set_xticks([])
-                    axs[ind, j].set_yticks([])
-                elif j == 13:
-                  axs[ind, j].remove()
-                elif j<15:
-                  ticks = range(len(barvals))
-                  axs[ind, j].bar(ticks, barvals, align='center')
-                  # axs[ind, j].set_xticks(ticks)
-                  axs[ind, j].tick_params(axis='x', rotation=0)
-                  # axs[i,j].hist(GT_cluster, )
-                  axs[ind, j+1].remove()
-                  axs[ind, j+2].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
-                  axs[ind, j+2].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
-            fig.align_ylabels()
-            # fig.tight_layout()
-            plt.savefig(
-              'Thesis figures/pascal/samples/filtered_{}_clusters_{:.4f}_MI.png'.format(n, MI1),
-              bbox_inches='tight')
-            # plt.show()
-            plt.close(fig)
+              elif j==13:
+                axs[ind, j].remove()
+              elif j < 15:
+                ticks = range(len(barvals))
+                axs[ind, j].bar(ticks, barvals, align='center')
+                # axs[ind, j].set_xticks(ticks)
+                axs[ind, j].tick_params(axis='x', rotation=0)
+                # axs[i,j].hist(GT_cluster, )
+                axs[ind, j+1].remove()
+                axs[ind, j+2].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
+                axs[ind, j+2].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
 
-            conHs[str(n) + ' ' + str(vLen)] = condH
-            condHperClass = {}
-            for m in range(len(classesPopDS[0])):
-              Hs = []
-              for i, c in enumerate(patches2Include):
-                ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i,:])==list(classesIdx.values()).index(p['seg']))]
-                # if np.max(population[i,:]) >= purity:
-                #   chance2classify[np.argmax(population[i,:])] += len(ps)/classesPopDS[1][np.argmax(population[i,:])]
-                for p in ps:
-                  # print(type(classesIdx[m]))
-                  if p['seg'] == classesIdx[m]:
-                    Hs.append(condH[i])
-              condHperClass[m] = Hs
-            for pu in purity:
-              chance2classify = np.zeros(len(classesPopDS[0]))
-              cov = np.zeros(len(classesPopDS[0]))
-              for i, c in enumerate(patches2Include):
-                ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i, :]) == list(classesIdx.values()).index(p['seg']))]
-                if np.max(population[i, :]) >= pu:
-                  chance2classify[np.argmax(population[i, :])] += len(ps) / classesPopDS[1][np.argmax(population[i, :])]
-                  cov[np.argmax(population[i, :])] += len(ps)
-              chance2cl[str(n)+'_'+str(pu)] = chance2classify
-              coverage[str(vLen)+'_'+str(pu)] = cov
-            condHperC[str(n)+'_'+str(vLen)] = condHperClass
+          for ind, k in enumerate(np.argsort(sortbyH)[-5:]):
+
+            i = k
+            ind += sum(clusters2show.values())
+            idxlist = np.where(clusters.labels_ == i)[0]
+            #       print(len(idxlist[0])/len(patches))
+            print(idxlist)
+            GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
+            classesPop = np.unique(GT_cluster, return_counts=True, axis=0)
+            # ticks = [classesPop[0][i][0]+' '+classesPop[0][i][1] for i in range(len(classesPop[0]))]
+            clusterscondH = sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0])
+            condH.append(clusterscondH)
+            barvals = []
+            for c in classesPopDS[0]:
+              if c in classesPop[0]:
+                barvals.append(classesPop[1][np.where(classesPop[0] == c)][0].item())
+              else:
+                barvals.append(0)
+          #   ticks = range(18)
+          #   # gs = axs[i, -2].get_gridspec()
+          #   # remove the underlying axes
+          #   # for ax in axs[i, 10:]:
+          #   #   ax.remove()
+          #   # axbig = fig.add_subplot(gs[i, 10:])
+            axs[ind, 0].set_ylabel(
+              'cluster no.{} \n H={:.4f} #im={}' .format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
+              rotation=0, size='small', loc='center')
+            axs[ind, 1].set_ylabel(
+              'dominant class:{} \n p_class={:.4f}'.format(classesPopDS[0][np.argmax(population[i, :])],
+                                                                                        np.max(population[i, :])),
+              rotation=0, size='small', loc='center')
+            for j in range(15):
+              if j == 0 or j==1:
+                plt.setp(axs[ind, j].spines.values(), color='white')
+                axs[ind, j].set_xticks([])
+                axs[ind, j].set_yticks([])
+              elif j < 7:
+                try:
+                  axs[ind, j].imshow(ims_true[i][j - 2])
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+                except:
+                  plt.setp(axs[ind, j].spines.values(), color='white')
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+                # plt.setp(axs[i, j].spines.values(),color='green', linewidth=5)
+              elif j == 7:
+                axs[ind, j].remove()
+              elif j < 13:
+                try:
+                  axs[ind, j].imshow(ims_false[i][j - 8])
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+                  # plt.setp(axs[i, j].spines.values(), color='red', linewidth=5)
+                except:
+                  plt.setp(axs[ind, j].spines.values(), color='white')
+                  axs[ind, j].set_xticks([])
+                  axs[ind, j].set_yticks([])
+              elif j == 13:
+                axs[ind, j].remove()
+              elif j<15:
+                ticks = range(len(barvals))
+                axs[ind, j].bar(ticks, barvals, align='center')
+                # axs[ind, j].set_xticks(ticks)
+                axs[ind, j].tick_params(axis='x', rotation=0)
+                # axs[i,j].hist(GT_cluster, )
+                axs[ind, j+1].remove()
+                axs[ind, j+2].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
+                axs[ind, j+2].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
+          fig.align_ylabels()
+          # fig.tight_layout()
+          plt.savefig(
+            'Thesis figures/pascal/samples/filtered_{}_clusters_{:.4f}_MI.png'.format(n, MI1),
+            bbox_inches='tight')
+          # plt.show()
+          plt.close(fig)
+
+          conHs[str(n) + ' ' + str(vLen)] = condH
+          condHperClass = {}
+          for m in range(len(classesPopDS[0])):
+            Hs = []
+            for i, c in enumerate(patches2Include):
+              ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i,:])==list(classesIdx.values()).index(p['seg']))]
+              # if np.max(population[i,:]) >= purity:
+              #   chance2classify[np.argmax(population[i,:])] += len(ps)/classesPopDS[1][np.argmax(population[i,:])]
+              for p in ps:
+                # print(type(classesIdx[m]))
+                if p['seg'] == classesIdx[m]:
+                  Hs.append(condH[i])
+            condHperClass[m] = Hs
+          for pu in purity:
+            chance2classify = np.zeros(len(classesPopDS[0]))
+            cov = np.zeros(len(classesPopDS[0]))
+            for i, c in enumerate(patches2Include):
+              ps = [p for p in patches if (p['idx'] in c and np.argmax(population[i, :]) == list(classesIdx.values()).index(p['seg']))]
+              if np.max(population[i, :]) >= pu:
+                chance2classify[np.argmax(population[i, :])] += len(ps) / classesPopDS[1][np.argmax(population[i, :])]
+                cov[np.argmax(population[i, :])] += len(ps)
+            chance2cl[str(n)+'_'+str(pu)] = chance2classify
+            coverage[str(vLen)+'_'+str(pu)] = cov
+          condHperC[str(n)+'_'+str(vLen)] = condHperClass
           MIs[str(n)] = MI_n
 
 
@@ -4654,6 +4696,14 @@ def get_representations():
           for j in range(6):
             axs[i, j].imshow(ims[i * 6 + j])
         plt.show()
+
+
+
+      # except Exception as e:  # pylint: disable=broad-except
+      #   coord.request_stop(e)
+      #
+      # coord.request_stop()
+      # coord.join(threads, stop_grace_period_secs=10)
           # patches = sorted(patches, key=lambda p: p['idx'])
           # mymetric = sklearn.metrics.make_scorer(calcPatchDist)
           # clustering_kmeans = SpectralClustering(n_clusters=50,
@@ -4671,7 +4721,7 @@ def get_representations():
           # plt.hist(clustering_kmeans.labels_, bins=50)
   elif pascal_sparse:
     # image, mask, imname = getRep_pascal()
-
+    #
     # _, _, fuse = resnet50.inference(image, tf.zeros(
     #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
     #    resnet50_input.NUM_CLASSES]), tf.zeros(
@@ -4688,60 +4738,63 @@ def get_representations():
     #   else:
     #     print('No checkpoint file found')
     #     return
-    #   Start the queue runners.
-      # coord = tf.train.Coordinator()
-    # #
-    # # _, _, fuse = resnet50.inference(image, tf.zeros(
-    # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
-    # #    resnet50_input.NUM_CLASSES]), tf.zeros(
-    # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
-    # #    resnet50_input.NUM_CLASSES]))
-    # # # ### bsds model
-    # # saver = tf.train.Saver(tf.global_variables())
-    # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
-    # #                                       intra_op_parallelism_threads=1)) as sess:
-    # #   sess.run(tf.group(tf.initialize_all_variables(),
-    # #                     tf.initialize_local_variables()))
-    # #   ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-    # #   if ckpt and ckpt.model_checkpoint_path:
-    # #     saver.restore(sess, ckpt.model_checkpoint_path)
-    # #   else:
-    # #     print('No checkpoint file found')
-    # #     return
-    # # # ### pascal weights
-    # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
-    # # #                                       intra_op_parallelism_threads=1)) as sess:
-    # # #   model_dict = np.load('fp_weights.npy', allow_pickle=True).item()
-    # # #   all_vars = tf.trainable_variables()
-    # # #   for v in all_vars:
-    # # #     if (v.op.name.find("weights") > -1) and (v.op.name.find("softmax_linear") == -1) and (
-    # # #             v.op.name.find("fuse") == -1) and (v.op.name.find("conv5_3") == -1):
-    # # #       assign_op = v.assign(model_dict[v.op.name])
-    # # #       sess.run(assign_op)
-    # # #
-    # #   sess.run(tf.group(tf.initialize_all_variables(),
-    # #                     tf.initialize_local_variables()))
-    # # #   # ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
-    # # #   # if ckpt and ckpt.model_checkpoint_path:
-    # # #   #   saver.restore(sess, ckpt.model_checkpoint_path)
-    # # #   # else:
-    # # #   #   print('No checkpoint file found')
-    # # #   #   return
-    # # #   # Start the queue runners.
-    # #   coord = tf.train.Coordinator()
+    # #   Start the queue runners.
+    #   coord = tf.train.Coordinator()
+    # # # #
+    # # # # _, _, fuse = resnet50.inference(image, tf.zeros(
+    # # # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
+    # # # #    resnet50_input.NUM_CLASSES]), tf.zeros(
+    # # # #   [1, image.shape[1] // 4 + image.shape[1] % 4, image.shape[2] // 4 + image.shape[2] % 4,
+    # # # #    resnet50_input.NUM_CLASSES]))
+    # # # # # ### bsds model
+    # # # # saver = tf.train.Saver(tf.global_variables())
+    # # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
+    # # # #                                       intra_op_parallelism_threads=1)) as sess:
+    # # # #   sess.run(tf.group(tf.initialize_all_variables(),
+    # # # #                     tf.initialize_local_variables()))
+    # # # #   ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+    # # # #   if ckpt and ckpt.model_checkpoint_path:
+    # # # #     saver.restore(sess, ckpt.model_checkpoint_path)
+    # # # #   else:
+    # # # #     print('No checkpoint file found')
+    # # # #     return
+    # # # # # ### pascal weights
+    # # # # # with tf.Session(config=tf.ConfigProto(inter_op_parallelism_threads=1,
+    # # # # #                                       intra_op_parallelism_threads=1)) as sess:
+    # # # # #   model_dict = np.load('fp_weights.npy', allow_pickle=True).item()
+    # # # # #   all_vars = tf.trainable_variables()
+    # # # # #   for v in all_vars:
+    # # # # #     if (v.op.name.find("weights") > -1) and (v.op.name.find("softmax_linear") == -1) and (
+    # # # # #             v.op.name.find("fuse") == -1) and (v.op.name.find("conv5_3") == -1):
+    # # # # #       assign_op = v.assign(model_dict[v.op.name])
+    # # # # #       sess.run(assign_op)
+    # # # # #
+    # # # #   sess.run(tf.group(tf.initialize_all_variables(),
+    # # # #                     tf.initialize_local_variables()))
+    # # # # #   # ckpt = tf.train.get_checkpoint_state(FLAGS.train_dir)
+    # # # # #   # if ckpt and ckpt.model_checkpoint_path:
+    # # # # #   #   saver.restore(sess, ckpt.model_checkpoint_path)
+    # # # # #   # else:
+    # # # # #   #   print('No checkpoint file found')
+    # # # # #   #   return
+    # # # # #   # Start the queue runners.
+    # # # #   coord = tf.train.Coordinator()
     #   try:
     #     threads = []
     #     for qr in tf.get_collection(tf.GraphKeys.QUEUE_RUNNERS):
     #       threads.extend(qr.create_threads(sess, coord=coord, daemon=False,
     #                                        start=True))
     #     patches = getPatchDS_pascal(sess, image, mask, imname, fuse, patch_size=8, ifPCA=True, n=16, BG=False)
-        # patches = getPatchDS_frompkl()
-        #
-        # with open('patches_8_pascal_pca16_balanced_noBG_{}.pkl'.format(datetime.now()), 'wb') as f:
-        #   pickle.dump(patches, f)
+    #
+    #     # patches = getPatchDS_frompkl()
+    #     #
+    #     with open('patches_8_pascal_pca16_balanced_noBG_sparse_overlap.pkl', 'wb') as f:
+    #       pickle.dump(patches, f)
 
-        with open('patches_8_pascal_pca16_balanced_noBG_2025-02-02 12:34:41.083454.pkl', 'rb') as f:
+        with open('patches_4_pascal_pca16_balanced_noBG.pkl', 'rb') as f:
           patches = pickle.load(f)
+        # with open('patches_8_pascal_pca16_balanced_noBG_2025-02-02 12:34:41.083454.pkl', 'rb') as f:
+        #   patches = pickle.load(f)
         # with open('patches_8_pascal_pca16_balanced_noBG_2024-12-15 13:06:11.715102.pkl', 'rb') as f:
         #   patches = pickle.load(f)
         # filtered_patches = []
@@ -4756,10 +4809,13 @@ def get_representations():
         # dissim = compute_all_dissim_parallel(patches, block_size=5000, percentile=10, max_workers=8)
         # N = len(patches)
         # Open the same raw file in read-only or read-write mode:
-        with open("csr_dissim.pkl", "rb") as f:
-          dissim = pickle.load(f)
-        # dissim = create_dissim_sparse(patches)
+        # with open("csrdissim_14k.pkl", "rb") as f:
+        #   dissim = pickle.load(f)
+        dissim = create_dissim_sparse(patches)
+
+
         print(dissim.shape)
+
         # scores = dist_methods_comparison(patches)
         # with open('patches_8_pascal_pca16_balanced_noBG_2024-03-07 12:22:39.858088.pkl', 'rb') as f:
         #   patches = pickle.load(f)
@@ -4955,8 +5011,8 @@ def get_representations():
         vLens = [20]
         clustersCenterD = []
         inClustersD = []
-        ns = range(50,201,50)
-
+        ns = range(100,701,100)
+        # ns = [20]
         # fig2, ax2 = plt.subplots()
         segvals = [(p['seg']) for p in patches]
         classesPopDS = np.unique(segvals, return_counts=True, axis=0)
@@ -4964,9 +5020,10 @@ def get_representations():
         MIs = {}
         conHs = {}
         condHperC = {}
-        purity = np.arange(0.1, 1, 0.1)
+        purity = np.arange(0.1, 1.1, 0.1)
         chance2cl = {}
         coverage = {}
+        correctC = []
         for n in tqdm(ns):
           MI_n = []
         #   ims_true = []
@@ -5240,6 +5297,9 @@ def get_representations():
             purity_test = []
             train_label = []
             test_label = []
+            patchescounter_train = []
+            patchescounter_test=[]
+            correctclassifiedpatches = []
             vLen=n
             ims_true = []
             ims_false = []
@@ -5299,11 +5359,16 @@ def get_representations():
               test_pop = np.unique(gt_test, return_counts=True, axis=0)
               purity_train.append(np.max(train_pop[1])/sum(train_pop[1]))
               train_label.append(train_pop[0][np.argmax(train_pop[1])])
-              try:
-                purity_test.append(np.max(test_pop[1])/sum(test_pop[1]))
+              patchescounter_train.append(sum(train_pop[1]))
+              patchescounter_test.append(sum(test_pop[1]))
+              classification = np.where(test_pop[0] == train_pop[0][np.argmax(train_pop[1])])
+              if len(classification[0])==1:
+                purity_test.append(test_pop[1][classification]/sum(test_pop[1]))
                 test_label.append(test_pop[0][np.argmax(test_pop[1])])
-              except:
-                purity_test.append(None)
+                correctclassifiedpatches.append(test_pop[1][classification])
+              else:
+                purity_test.append(np.array([0]))
+                correctclassifiedpatches.append(np.array([0]))
                 test_label.append(None)
               GT_cluster = [(p['seg']) for p in patches if p['idx'] in idxlist]
               classesPop = np.unique(gt_train, return_counts=True, axis=0) #np.unique(GT_cluster, return_counts=True, axis=0)
@@ -5378,7 +5443,9 @@ def get_representations():
 
             sortbyH = [sum([(probs[i, j]/sum(probs[i,:])) * np.log(1/(probs[i, j]/sum(probs[i,:]))) for j in range(len(classesPopDS[0])) if probs[i, j] != 0]) for i in range(n)]
             sortbyclass = [np.argmax(population[i, :]) for i in range(n)]
-            sortedclustersIdx = np.lexsort((sortbyH, sortbyclass))
+            sortedclustersIdx = np.lexsort(([-(a*b)[0] for a,b in zip(correctclassifiedpatches, purity_test)], sortbyclass))
+            sortedbyclassification = np.argsort([-(a * b)[0] for a, b in zip(correctclassifiedpatches, purity_test)])
+
             # create similarity hists
             patchesBycluster = np.hstack(patches2Include)
             # distsFromClustersCenter = clusters.transform(Y)
@@ -5395,8 +5462,8 @@ def get_representations():
                 clusters2show[str(np.argmax(population[i, :]))]=1
             numOfRows = sum(clusters2show.values())+5
             fig, axs = plt.subplots(numOfRows, 15, figsize=(numOfRows, 15),
-                                    gridspec_kw={'width_ratios': [2, 1, 1, 1, 1, 1, 1, 0.2, 1, 1, 1, 1, 1, 0.2, 2]})
-            plt.subplots_adjust(hspace=0.4)
+                                    gridspec_kw={'width_ratios': [2, 2, 1, 1, 1, 1, 1, 0.2, 1, 1, 1, 1, 1, 0.2, 2]}, constrained_layout=True)
+            # plt.subplots_adjust(hspace=0.4)
             # fig.suptitle('{} clusters, MI = {}'.format(n, MI1))
             # plt.subplots_adjust(wspace=0.05, hspace=0.6)  # , left=2, right=2.2)
 
@@ -5558,14 +5625,13 @@ def get_representations():
             #   #   ax.remove()
             #   # axbig = fig.add_subplot(gs[i, 10:])
               axs[ind, 0].set_ylabel(
-                'cluster no.{} \n H={:.4f} #im={}'.format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
+                'cluster no.{} \n H={:.4f} #im={} \n #p-train={} #p-test={}'.format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1]), patchescounter_train[i], patchescounter_test[i]),
                 rotation=0, size='medium', loc='center')
               axs[ind, 1].set_ylabel(
-                'dominant train:{} \n purity={:.4f} \n dominant test:{} \n purity={:.4f}'.format(train_label[i],
+                'dominant train:{} \n purity={:.4f} \n  classification score={:.4f}'.format(train_label[i],
                                                                                                  purity_train[i],
-                                                                                                 test_label[i],
-                                                                                                 purity_test[i]),
-                rotation=0, size='small', loc='center')
+                                                                                                 purity_test[i][0]),
+                rotation=0, size='medium', loc='center')
               for j in range(15):
                 if j == 0 or j==1:
                   plt.setp(axs[ind, j].spines.values(), color='white')
@@ -5605,7 +5671,7 @@ def get_representations():
                 #   axs[ind, j+2].hist(dists_within_cluster[k][dists_within_cluster[k]!=1].flatten(), density=True, bins=50)
                 #   axs[ind, j+2].hist(dists_between_cluster[k].flatten(), density=True, bins=50, alpha=0.5)
 
-            for ind, k in enumerate(np.argsort(sortbyH)[-5:]):
+            for ind, k in enumerate(sortedbyclassification[-5:]):
 
               i = k
               ind += sum(clusters2show.values())
@@ -5630,11 +5696,16 @@ def get_representations():
             #   #   ax.remove()
             #   # axbig = fig.add_subplot(gs[i, 10:])
               axs[ind, 0].set_ylabel(
-                'cluster no.{} \n H={:.4f} #im={}' .format(i, clusterscondH, len(np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1])),
-                rotation=0, size='small', loc='center')
+                'cluster no.{} \n H={:.4f} #im={} \n #p_(train)={} #p_(test)={}'.format(i, clusterscondH, len(
+                  np.unique([(p['im_id']) for p in patches if p['idx'] in idxlist], return_counts=True)[1]),
+                                                                                        patchescounter_train[i],
+                                                                                        patchescounter_test[i]),
+                rotation=0, size='medium', loc='center')
               axs[ind, 1].set_ylabel(
-                'dominant train:{} \n purity={:.4f} \n dominant test:{} \n purity={:.4f}'.format(train_label[i], purity_train[i], test_label[i], purity_test[i]),
-                rotation=0, size='small', loc='center')
+                'dominant train:{} \n purity={:.4f} \n  classification score={:.4f}'.format(train_label[i],
+                                                                                            purity_train[i],
+                                                                                            purity_test[i][0]),
+                rotation=0, size='medium', loc='center')
               for j in range(15):
                 if j == 0 or j==1:
                   plt.setp(axs[ind, j].spines.values(), color='white')
@@ -5681,6 +5752,7 @@ def get_representations():
             # plt.show()
             plt.close(fig)
 
+            correctC.append(((sum(a == b for a, b in zip(test_label, train_label))/len(train_label)), np.mean(purity_train), np.mean(purity_test)))
             conHs[str(n) + ' ' + str(vLen)] = condH
             condHperClass = {}
             for m in range(len(classesPopDS[0])):
